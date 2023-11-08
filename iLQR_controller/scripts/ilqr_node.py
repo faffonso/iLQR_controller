@@ -16,6 +16,7 @@ class iLQR():
         Args:
             dynamics: Dynamics System.
             cost: Cost function.
+            dt: Sampling time
             N: Horizon length.
         """
         self.dt = dt
@@ -29,9 +30,9 @@ class iLQR():
         self._K = np.zeros((N, 2, 3))
 
 
-    def fit(self, x0, u0, n_iter=18, tol=1e-6):
+    def fit(self, x0, u0, n_iter=15, tol=1e-6):
 
-        alphas = 1.1**(-np.arange(10)**2)
+        alphas = 0.5**np.arange(8)
 
         """Compute optimal control
 
@@ -48,14 +49,32 @@ class iLQR():
 
         xs = x0
         us = u0  
+        J_old = self._rollout(xs[0], us)
 
         for iteration in range(n_iter):
-            print(xs)
+            # print(f'Iteration {iteration}')
+            k, K, _ = self._backward_pass(xs, us)
+
+            for alpha in alphas:
+                xs_new, us_new = self._forward_pass(xs, us, k, K, alpha)
+                J = self.cost._trajectory_cost(xs_new, us_new)
+
+                print(xs_new)
+
+                print(f'Trying convergence {J} on {J_old}')
+                
+                if (abs(J) < abs(J_old)):
+                    J_old = J
+                    xs = xs_new
+                    us = us_new
+                    break
+
+            #print(xs)
 
             x = xs[:, 0]
             y = xs[:, 1]
             orientacao = xs[:, 2]
-            
+                
             # Plote os dados
             plt.figure(figsize=(8, 6))
             plt.scatter(x, y, c=orientacao, cmap='viridis', marker='o')
@@ -67,9 +86,7 @@ class iLQR():
             plt.show()
 
 
-            print(f'Iteration {iteration}')
-            k, K, _ = self._backward_pass(xs, us)
-            xs, us = self._forward_pass(xs[0], us, k, K)
+
 
     def _control(self, xs, us, k, K, alpha=1.0):
         """Applies the controls for a given trajectory.
@@ -87,7 +104,7 @@ class iLQR():
         """
         pass
 
-    def _forward_pass(self, x0, us, ks, Ks, hessian=False):
+    def _forward_pass(self, xs, us, ks, Ks, alpha, hessian=False):
         """Apply the forward dynamics
 
         Args:
@@ -96,32 +113,24 @@ class iLQR():
 
         Returns:
             Tuple of:
-                xs: State path.
-                Q_x: Jacobian of state path w.r.t. x.
-                Q_u: Jacobian of state path w.r.t. u.
-                l: Cost path .
-                L_x: Jacobian of cost path w.r.t. x.
-                L_u: Jacobian of cost path w.r.t. u. 
-                l_xx: Hessian of cost path w.r.t. x, x.
-                l_ux: Hessian of cost path w.r.t. u, x.
-                l_uu: Hessian of cost path w.r.t. u, u.
-                Q_xx: Hessian of state path w.r.t. x, x .
-                Q_ux: Hessian of state path w.r.t. u, x.
-                Q_uu: Hessian of state path w.r.t. u, u.
+                x: State path.
+                us: Action control
         """
-        u = np.empty((self.N, 2))
-        x = np.empty((self.N, 3))
+        
+        u_new = np.empty((self.N, 2))
+        x_new = np.empty((self.N, 3))
 
-        x[0] = x0
+        x_new = xs
 
         for i in range (self.N-1):
-            us[i] += Ks[i] @ x[i] + self.alpha * ks[i]
+            u_new[i] = us[i] + Ks[i] @ (x_new[i] - xs[i]) + alpha * ks[i]
 
-            x_next = x[i] + self.dynamics.f(x[i], us[i]) * self.dt
+            x_next = xs[i] + self.dynamics.f(xs[i], us[i]) * self.dt
+            
             for j in range(3):
-                x[i+1][j] = x_next[j]
+                x_new[i+1][j] = x_next[j]
 
-        return x, us
+        return x_new, u_new
 
 
 
@@ -154,8 +163,7 @@ class iLQR():
 
         v_x = Qf @ xs[0]
         v_xx = Qf
-        
-        for n in range(us.shape[0] - 1, -1, -1):
+        for n in range(us.shape[0] - 1):
 
             f_x, f_u = self.dynamics.f_prime(xs[n], us[n])
             l_x, l_u, l_xx, l_ux, l_uu  = self.cost.l_prime(xs[n], us[n])
@@ -184,6 +192,22 @@ class iLQR():
 
         return ks, Ks, delta_V
         
+    def _rollout(self, x0, us):
+        J = 0
+        N = us.shape[0]
+
+        xs = np.empty((N, 3))
+        xs[0] = x0
+
+
+        for n in range(N - 1):
+            x_next = self.dynamics.f(xs[n], us[n]) * self.dt
+            for j in range(3):
+                xs[n+1][j] = xs[n][j] + x_next[j]
+            J += self.cost._l(xs[n], us[n])[0]
+        
+        return J
+    
 class Dynamics():
     def __init__(self, vr, omegar, dt=.1):
 
@@ -217,7 +241,6 @@ class Dynamics():
 class Cost():
     def __init__(self, Q, R, Qf):
         x = ca.SX.sym('e', 3)
-        xn = ca.SX.sym('en', 3)
         u = ca.SX.sym('u', 2)
 
         self.Qf = Qf
@@ -231,10 +254,14 @@ class Cost():
         self._lu = ca.Function('lu', [x, u], [ca.jacobian(self._l(x, u), u)])
         
     
+    def _trajectory_cost(self, xs, us):
+        J = 0
+        for x, u in zip(xs, us):
+            J += self._l(x, u)[0]
+
+        return J
+
     def l_prime(self, x, u):
-
-
-
         l_x = self.Q @ x
         l_u = self.R @ u
 
@@ -248,20 +275,22 @@ class Cost():
         return self.Qf
     
 if __name__ == "__main__":
-    vr = .5
+    vr = .1
     omegar = 0.0
-    N = 18
+    N = 10
 
-    Q = np.diag([3.0, 3.0, 1.0])
-    R = np.diag([1, 1])
-    Qf = np.diag([5.0, 5.0, 5.0])
+    Q = np.diag([1.0, 1.0, 1.0])
+    R = np.diag([1.0, 1.0])
+    Qf = np.diag([1.0, 1.0, 1.0])
 
     dynamics = Dynamics(vr, omegar)
     cost = Cost(Q, R, Qf)
 
-    x0 = np.array([[-1.0, -2.5, 0]] * 18)
-    u0 = np.array([[0.0, 0.0]] * 18)
+    x0 = np.array([[-2.0, -1.0, 0]] * N, dtype=float)
+    u0 = np.array([[vr, 0.0]] * N)
 
-    controller = iLQR(dynamics, cost)
+    print(u0)
+
+    controller = iLQR(dynamics, cost, N=N)
     controller.fit(x0, u0)
 
