@@ -31,9 +31,6 @@ class iLQR():
 
 
     def fit(self, x0, u0, n_iter=15, tol=1e-6):
-
-        alphas = 0.5**np.arange(8)
-
         """Compute optimal control
 
         Args:
@@ -49,17 +46,18 @@ class iLQR():
 
         xs = x0
         us = u0  
+        alphas = 0.5**np.arange(8)
+
+        # Rollout for first J
         J_old = self._rollout(xs[0], us)
 
+        # Action control compute loop
         for iteration in range(n_iter):
-            # print(f'Iteration {iteration}')
             k, K, _ = self._backward_pass(xs, us)
 
             for alpha in alphas:
                 xs_new, us_new = self._forward_pass(xs, us, k, K, alpha)
                 J = self.cost._trajectory_cost(xs_new, us_new)
-
-                print(xs_new)
 
                 print(f'Trying convergence {J} on {J_old}')
                 
@@ -69,52 +67,22 @@ class iLQR():
                     us = us_new
                     break
 
-            #print(xs)
-
-            x = xs[:, 0]
-            y = xs[:, 1]
-            orientacao = xs[:, 2]
-                
-            # Plote os dados
-            plt.figure(figsize=(8, 6))
-            plt.scatter(x, y, c=orientacao, cmap='viridis', marker='o')
-            plt.colorbar(label='Orientação (graus)')
-            plt.xlabel('Coordenada X')
-            plt.ylabel('Coordenada Y')
-            plt.title('Plot de Posições x, y e Orientação')
-            plt.grid(True)
-            plt.show()
-
-
-
-
-    def _control(self, xs, us, k, K, alpha=1.0):
-        """Applies the controls for a given trajectory.
-
-        Args:
-            xs: Nominal state path.
-            us: Nominal control path.
-            k: Feedforward gains.
-            K: Feedback gains.
-            alpha: Line search coefficient.
-
-        Returns:
-            xs: state path.
-            us: control path.
-        """
-        pass
+        return xs, us
 
     def _forward_pass(self, xs, us, ks, Ks, alpha, hessian=False):
         """Apply the forward dynamics
 
         Args:
-            x0: Initial state.
+            xs: Initial state.
             us: Control path.
-
+            ks: Feedforward gains.
+            Ks: Feedback gains.
+            alpha: Line search coefficient.
+            
         Returns:
             Tuple of:
-                x: State path.
-                us: Action control
+                x_new: New state path.
+                u_new: New action control.
         """
         
         u_new = np.empty((self.N, 2))
@@ -122,6 +90,7 @@ class iLQR():
 
         x_new = xs
 
+        # Compute new action and state control
         for i in range (self.N-1):
             u_new[i] = us[i] + Ks[i] @ (x_new[i] - xs[i]) + alpha * ks[i]
 
@@ -138,36 +107,31 @@ class iLQR():
         """Computes the feedforward and feedback gains k and K.
 
         Args:
-            Q_x: Jacobian of state path w.r.t. x.
-            Q_u: Jacobian of state path w.r.t. u.
-            l_x: Jacobian of cost path w.r.t. x.
-            l_u: Jacobian of cost path w.r.t. u.
-            l_xx: Hessian of cost path w.r.t. x, x.
-            l_ux: Hessian of cost path w.r.t. u, x.
-            l_uu: Hessian of cost path w.r.t. u, u.
-            Q_xx: Hessian of state path w.r.t. x, x.
-            Q_ux: Hessian of state path w.r.t. u, x.
-            Q_uu: Hessian of state path w.r.t. u, u
+            xs: Initial state.
+            us: Control path.
 
         Returns:
-            k: feedforward gains.
-            K: feedback gains.
+            ks: feedforward gains.
+            Ks: feedback gains.
+            J: Cost path.
         """
         
         ks = np.empty(us.shape)
         Ks = np.empty((us.shape[0], us.shape[1], xs.shape[1]))
 
-        delta_V = 0
+        J = 0
 
         Qf = cost.get_Qf()
 
         v_x = Qf @ xs[0]
         v_xx = Qf
+
+
         for n in range(us.shape[0] - 1):
 
+            # Obtain f and l derivatives
             f_x, f_u = self.dynamics.f_prime(xs[n], us[n])
             l_x, l_u, l_xx, l_ux, l_uu  = self.cost.l_prime(xs[n], us[n])
-        
 
             # Q_terms
             Q_x  = l_x  + f_x.T @ v_x
@@ -176,6 +140,7 @@ class iLQR():
             Q_uu = l_uu + f_u.T @ v_xx @ f_u
             Q_ux = l_ux + f_u.T @ v_xx @ f_x
 
+            # Feedforward and feedback gains
             k = -np.linalg.inv(Q_uu) @ Q_u
             K = -np.linalg.inv(Q_uu) @ Q_ux
             
@@ -187,19 +152,30 @@ class iLQR():
             # V_terms
             v_x  = Q_x + K.T @ Q_u + Q_ux.T @ k + K.T @ Q_uu @ k
             v_xx = Q_xx + K.T@Q_ux + Q_ux.T @ K + K.T @ Q_uu @ K
-            #expected cost reduction
-            delta_V += Q_u.T@k + 0.5*k.T@Q_uu@k
 
-        return ks, Ks, delta_V
+            #Sum cost 
+            J += Q_u.T@k + 0.5*k.T@Q_uu@k
+
+        return ks, Ks, J
         
     def _rollout(self, x0, us):
+        """Apply the forward dynamics to have a trajectory from the starting
+        state x0 by applying the control path us.
+
+        Args:
+            x0: Initial state.
+            us: Control path.
+
+        Returns:
+            J: Cost path.
+        """
         J = 0
         N = us.shape[0]
 
         xs = np.empty((N, 3))
         xs[0] = x0
 
-
+        # Calculate path state over a x0 and us
         for n in range(N - 1):
             x_next = self.dynamics.f(xs[n], us[n]) * self.dt
             for j in range(3):
@@ -289,8 +265,5 @@ if __name__ == "__main__":
     x0 = np.array([[-2.0, -1.0, 0]] * N, dtype=float)
     u0 = np.array([[vr, 0.0]] * N)
 
-    print(u0)
-
     controller = iLQR(dynamics, cost, N=N)
     controller.fit(x0, u0)
-
